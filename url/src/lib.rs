@@ -131,11 +131,6 @@ url = { version = "2", default-features = false }
 */
 
 #![doc(html_root_url = "https://docs.rs/url/2.2.2")]
-#![cfg_attr(
-    feature = "debugger_visualizer",
-    feature(debugger_visualizer),
-    debugger_visualizer(natvis_file = "../../debug_metadata/url.natvis")
-)]
 
 pub use form_urlencoded;
 
@@ -2836,17 +2831,11 @@ fn file_url_segments_to_pathbuf_windows(
 
         match first.len() {
             2 => {
-                if !first.starts_with(parser::ascii_alpha) || first.as_bytes()[1] != b':' {
-                    return Err(());
-                }
 
                 first.to_owned()
             }
 
             4 => {
-                if !first.starts_with(parser::ascii_alpha) {
-                    return Err(());
-                }
                 let bytes = first.as_bytes();
                 if bytes[1] != b'%' || bytes[2] != b'3' || (bytes[3] != b'a' && bytes[3] != b'A') {
                     return Err(());

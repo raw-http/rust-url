@@ -13,7 +13,7 @@ use std::str;
 use crate::host::{Host, HostInternal};
 use crate::Url;
 use form_urlencoded::EncodingOverride;
-use percent_encoding::{percent_encode, utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{percent_encode, AsciiSet, CONTROLS};
 
 /// https://url.spec.whatwg.org/#fragment-percent-encode-set
 const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
@@ -38,7 +38,6 @@ pub(crate) const PATH_SEGMENT: &AsciiSet = &PATH.add(b'/').add(b'%');
 
 // The backslash (\) character is treated as a path separator in special URLs
 // so it needs to be additionally escaped in that case.
-pub(crate) const SPECIAL_PATH_SEGMENT: &AsciiSet = &PATH_SEGMENT.add(b'\\');
 
 // https://url.spec.whatwg.org/#query-state
 const QUERY: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'<').add(b'>');
@@ -143,7 +142,7 @@ impl fmt::Display for SyntaxViolation {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum SchemeType {
     File,
     SpecialNotFile,
@@ -197,7 +196,7 @@ impl<'i> Input<'i> {
         original_input: &'i str,
         vfn: Option<&dyn Fn(SyntaxViolation)>,
     ) -> Self {
-        let input = original_input.trim_matches(ascii_tab_or_new_line);
+        let input = original_input;
         if let Some(vfn) = vfn {
             if input.len() < original_input.len() {
                 vfn(SyntaxViolation::C0SpaceIgnored)
@@ -386,7 +385,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_scheme<'i>(&mut self, mut input: Input<'i>) -> Result<Input<'i>, ()> {
-        if input.is_empty() || !input.starts_with(ascii_alpha) {
+        if input.is_empty() {
             return Err(());
         }
         debug_assert!(self.serialization.is_empty());
@@ -921,9 +920,7 @@ impl<'a> Parser<'a> {
                 if !has_password {
                     has_username = true;
                 }
-                self.check_url_code_point(c, &input);
-                self.serialization
-                    .extend(utf8_percent_encode(utf8_c, USERINFO));
+                self.serialization.push_str(utf8_c);
             }
         }
         let username_end = match username_end {
@@ -1188,30 +1185,19 @@ impl<'a> Parser<'a> {
                         ends_with_slash = true;
                         break;
                     }
-                    '\\' if self.context != Context::PathSegmentSetter
-                        && scheme_type.is_special() =>
-                    {
-                        self.log_violation(SyntaxViolation::Backslash);
-                        self.serialization.push('/');
-                        ends_with_slash = true;
-                        break;
-                    }
                     '?' | '#' if self.context == Context::UrlParser => {
                         input = input_before_c;
                         break;
                     }
                     _ => {
-                        self.check_url_code_point(c, &input);
                         if self.context == Context::PathSegmentSetter {
                             if scheme_type.is_special() {
-                                self.serialization
-                                    .extend(utf8_percent_encode(utf8_c, SPECIAL_PATH_SEGMENT));
+                                self.serialization.push_str(utf8_c);
                             } else {
-                                self.serialization
-                                    .extend(utf8_percent_encode(utf8_c, PATH_SEGMENT));
+                                self.serialization.push_str(utf8_c);
                             }
                         } else {
-                            self.serialization.extend(utf8_percent_encode(utf8_c, PATH));
+                            self.serialization.push_str(utf8_c);
                         }
                     }
                 }
@@ -1222,31 +1208,6 @@ impl<'a> Parser<'a> {
                 &self.serialization[segment_start..self.serialization.len()]
             };
             match segment_before_slash {
-                // If buffer is a double-dot path segment, shorten url’s path,
-                ".." | "%2e%2e" | "%2e%2E" | "%2E%2e" | "%2E%2E" | "%2e." | "%2E." | ".%2e"
-                | ".%2E" => {
-                    debug_assert!(self.serialization.as_bytes()[segment_start - 1] == b'/');
-                    self.serialization.truncate(segment_start);
-                    if self.serialization.ends_with('/')
-                        && Parser::last_slash_can_be_removed(&self.serialization, path_start)
-                    {
-                        self.serialization.pop();
-                    }
-                    self.shorten_path(scheme_type, path_start);
-
-                    // and then if neither c is U+002F (/), nor url is special and c is U+005C (\), append the empty string to url’s path.
-                    if ends_with_slash && !self.serialization.ends_with('/') {
-                        self.serialization.push('/');
-                    }
-                }
-                // Otherwise, if buffer is a single-dot path segment and if neither c is U+002F (/),
-                // nor url is special and c is U+005C (\), append the empty string to url’s path.
-                "." | "%2e" | "%2E" => {
-                    self.serialization.truncate(segment_start);
-                    if !self.serialization.ends_with('/') {
-                        self.serialization.push('/');
-                    }
-                }
                 _ => {
                     // If url’s scheme is "file", url’s path is empty, and buffer is a Windows drive letter, then
                     if scheme_type.is_file() && is_windows_drive_letter(segment_before_slash) {
@@ -1285,17 +1246,6 @@ impl<'a> Parser<'a> {
         input
     }
 
-    fn last_slash_can_be_removed(serialization: &str, path_start: usize) -> bool {
-        let url_before_segment = &serialization[..serialization.len() - 1];
-        if let Some(segment_before_start) = url_before_segment.rfind('/') {
-            // Do not remove the root slash
-            segment_before_start >= path_start
-                // Or a windows drive letter slash
-                && !path_starts_with_windows_drive_letter(&serialization[segment_before_start..])
-        } else {
-            false
-        }
-    }
 
     /// https://url.spec.whatwg.org/#shorten-a-urls-path
     fn shorten_path(&mut self, scheme_type: SchemeType, path_start: usize) {
@@ -1335,10 +1285,8 @@ impl<'a> Parser<'a> {
                 Some(('?', _)) | Some(('#', _)) if self.context == Context::UrlParser => {
                     return input_before_c
                 }
-                Some((c, utf8_c)) => {
-                    self.check_url_code_point(c, &input);
-                    self.serialization
-                        .extend(utf8_percent_encode(utf8_c, CONTROLS));
+                Some((_, utf8_c)) => {
+                    self.serialization.push_str(utf8_c);
                 }
                 None => return input,
             }
@@ -1418,7 +1366,6 @@ impl<'a> Parser<'a> {
                 remaining = Some(input);
                 break;
             } else {
-                self.check_url_code_point(c, &input);
                 query.push(c);
             }
         }
@@ -1462,80 +1409,17 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse_fragment(&mut self, mut input: Input<'_>) {
-        while let Some((c, utf8_c)) = input.next_utf8() {
-            if c == '\0' {
-                self.log_violation(SyntaxViolation::NullInFragment)
-            } else {
-                self.check_url_code_point(c, &input);
-            }
-            self.serialization
-                .extend(utf8_percent_encode(utf8_c, FRAGMENT));
-        }
-    }
-
-    fn check_url_code_point(&self, c: char, input: &Input<'_>) {
-        if let Some(vfn) = self.violation_fn {
-            if c == '%' {
-                let mut input = input.clone();
-                if !matches!((input.next(), input.next()), (Some(a), Some(b))
-                             if is_ascii_hex_digit(a) && is_ascii_hex_digit(b))
-                {
-                    vfn(SyntaxViolation::PercentDecode)
-                }
-            } else if !is_url_code_point(c) {
-                vfn(SyntaxViolation::NonUrlCodePoint)
-            }
+        while let Some((_, utf8_c)) = input.next_utf8() {
+            self.serialization.push_str(utf8_c);
         }
     }
 }
 
-#[inline]
-fn is_ascii_hex_digit(c: char) -> bool {
-    matches!(c, 'a'..='f' | 'A'..='F' | '0'..='9')
-}
-
-// Non URL code points:
-// U+0000 to U+0020 (space)
-// " # % < > [ \ ] ^ ` { | }
-// U+007F to U+009F
-// surrogates
-// U+FDD0 to U+FDEF
-// Last two of each plane: U+__FFFE to U+__FFFF for __ in 00 to 10 hex
-#[inline]
-fn is_url_code_point(c: char) -> bool {
-    matches!(c,
-        'a'..='z' |
-        'A'..='Z' |
-        '0'..='9' |
-        '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | '-' |
-        '.' | '/' | ':' | ';' | '=' | '?' | '@' | '_' | '~' |
-        '\u{A0}'..='\u{D7FF}' | '\u{E000}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}' |
-        '\u{10000}'..='\u{1FFFD}' | '\u{20000}'..='\u{2FFFD}' |
-        '\u{30000}'..='\u{3FFFD}' | '\u{40000}'..='\u{4FFFD}' |
-        '\u{50000}'..='\u{5FFFD}' | '\u{60000}'..='\u{6FFFD}' |
-        '\u{70000}'..='\u{7FFFD}' | '\u{80000}'..='\u{8FFFD}' |
-        '\u{90000}'..='\u{9FFFD}' | '\u{A0000}'..='\u{AFFFD}' |
-        '\u{B0000}'..='\u{BFFFD}' | '\u{C0000}'..='\u{CFFFD}' |
-        '\u{D0000}'..='\u{DFFFD}' | '\u{E1000}'..='\u{EFFFD}' |
-        '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}')
-}
 
 /// https://url.spec.whatwg.org/#c0-controls-and-space
 #[inline]
 fn c0_control_or_space(ch: char) -> bool {
     ch <= ' ' // U+0000 to U+0020
-}
-
-/// https://infra.spec.whatwg.org/#ascii-tab-or-newline
-#[inline]
-fn ascii_tab_or_new_line(ch: char) -> bool {
-    matches!(ch, '\t' | '\r' | '\n')
-}
-
-/// https://url.spec.whatwg.org/#ascii-alpha
-#[inline]
-pub fn ascii_alpha(ch: char) -> bool {
-    matches!(ch, 'a'..='z' | 'A'..='Z')
 }
 
 #[inline]
@@ -1558,19 +1442,8 @@ pub fn is_windows_drive_letter(segment: &str) -> bool {
     segment.len() == 2 && starts_with_windows_drive_letter(segment)
 }
 
-/// Whether path starts with a root slash
-/// and a windows drive letter eg: "/c:" or "/a:/"
-fn path_starts_with_windows_drive_letter(s: &str) -> bool {
-    if let Some(c) = s.as_bytes().first() {
-        matches!(c, b'/' | b'\\' | b'?' | b'#') && starts_with_windows_drive_letter(&s[1..])
-    } else {
-        false
-    }
-}
-
 fn starts_with_windows_drive_letter(s: &str) -> bool {
     s.len() >= 2
-        && ascii_alpha(s.as_bytes()[0] as char)
         && matches!(s.as_bytes()[1], b':' | b'|')
         && (s.len() == 2 || matches!(s.as_bytes()[2], b'/' | b'\\' | b'?' | b'#'))
 }
@@ -1581,14 +1454,14 @@ fn starts_with_windows_drive_letter_segment(input: &Input<'_>) -> bool {
     match (input.next(), input.next(), input.next()) {
         // its first two code points are a Windows drive letter
         // its third code point is U+002F (/), U+005C (\), U+003F (?), or U+0023 (#).
-        (Some(a), Some(b), Some(c))
-            if ascii_alpha(a) && matches!(b, ':' | '|') && matches!(c, '/' | '\\' | '?' | '#') =>
+        (Some(_), Some(b), Some(c))
+            if matches!(b, ':' | '|') && matches!(c, '/' | '\\' | '?' | '#') =>
         {
             true
         }
         // its first two code points are a Windows drive letter
         // its length is 2
-        (Some(a), Some(b), None) if ascii_alpha(a) && matches!(b, ':' | '|') => true,
+        (Some(_), Some(b), None) if matches!(b, ':' | '|') => true,
         _ => false,
     }
 }
